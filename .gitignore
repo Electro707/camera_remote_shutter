@@ -10,8 +10,10 @@
 **/*Gerbers
 **/fp-info-cache
 *.kicad_sch-bak
-# Exclude all 3D models due to licensing (see README.md as to how to download them)
+# Exclude all PCB 3D models due to licensing (see README.md as to how to download them)
 PCB/3d_model
 # General .bak files
 *.bak
 *.nogit*
+# FeeeCAD and CAD stuff
+*.FCStd1
