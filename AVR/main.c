@@ -9,6 +9,7 @@
  * License, or (at your option) any later version.
  */
 #define F_CPU 8000000       // CPU clock cycles
+#define N_DIGITS    5
 
 #include <stdbool.h>
 #include <avr/io.h>
@@ -30,6 +31,7 @@
 #define TURN_OFF_GREEN_LED (LED_PORT |= LED_GREEN_PIN)
 #define TURN_OFF_BLUE_LED (LED_PORT |= LED_BLUE_PIN)
 #define TURN_OFF_ALL_LED TURN_OFF_RED_LED; TURN_OFF_GREEN_LED; TURN_OFF_BLUE_LED
+#define TURN_ON_CYAN TURN_ON_GREEN_LED; TURN_ON_BLUE_LED
 /* Rotary Encoder and Button Read Macros */
 #define READ_ROTARY_ENCODER_BIT ((PINA >> 6) & 0b11)
 #define READ_ROTARY_ENCODER_BUTTON ((PINB >> 4) & 0b1)
@@ -51,40 +53,66 @@ typedef enum{
     TRIGGER_MODE_STANDBY = 0,
     TRIGGER_MODE_ARM,
     TRIGGER_MODE_TRIGGERED,
+    TRIGGER_MODE_WAITING_FOR_NEXT_PIC,
     TRIGGER_MODE_END,
 }TriggerMode_e;
+
+typedef enum{
+    VARIABLE_CHANGE_TRT = 0,
+    VARIABLE_CHANGE_TT,
+    VARIABLE_CHANGE_NPIC,
+    VARIABLE_CHANGE_INVERV,
+}ChangeVariable_e;
 
 typedef struct{
     RotaryEncoderRotation_e dir;
     bool bt_press;   // true if we pressed on the rotary encoder
-}RotaryEncoderStruct;
+}RotaryEncoderStruct_s;
 
+/**
+ * All trigger settings
+ */
 typedef struct{
-    uint16_t tt;        // Time to Trigger
-    uint16_t trt;       // Trigger Duration
-    uint16_t old_tt;
-    uint16_t old_trt;
-    TriggerMode_e mode;
-    uint8_t selected_to_change;     // index to variable we selected to be changed
-    uint16_t *var_to_change;        // pointer to variable to change
-}ShutterTriggerVars;
+    int16_t tt;         // Time to Trigger
+    int16_t trt;        // Trigger Duration
+    int16_t n_pic;      // number of pictures for timelapse mode
+    int16_t tmlps_interv;   // The interval in seconds between different timelapse
+}ShutterTriggerVars_s;
+
+/**
+ * Any system/run-time config
+ */
+typedef struct{
+    TriggerMode_e mode;                 // the current trigger state machine mode
+    ChangeVariable_e selected_to_change;     // index to variable we selected to be changed
+    uint8_t selected_digit;         // index to digit to be changed
+    int16_t *var_to_change;        // pointer to variable to change
+}SystemConfig_s;
+
+const int16_t tens_radix[5] = {1, 10, 100, 1000, 10000};
 
 uint8_t blinking_led_var = 0;       // Variable used for blinking an LED during pre-trigger time
 uint8_t timer_counter = 0;          // Counter used to make TIMER0 count once a second
 
-ShutterTriggerVars shutter_trigger;
-RotaryEncoderStruct encoder_vars;
+ShutterTriggerVars_s shutter_trigger = {0};
+ShutterTriggerVars_s old_shutter_trigger = {0};
+RotaryEncoderStruct_s encoder_vars;
+SystemConfig_s sys;
 
 int text_to_ascii(uint16_t n, char *text);
 void update_sutter_trigger_time(void);
+void increment_change_var(void);
+void start_arming(void);
 
 int main(void){
+    uint8_t mode_bt_press = 0;
+    int16_t change_by;
     // Clear variables
     shutter_trigger.tt = 0;
     shutter_trigger.trt = 10;
-    shutter_trigger.mode = TRIGGER_MODE_STANDBY;
-    shutter_trigger.selected_to_change = 1;
-    shutter_trigger.var_to_change = &shutter_trigger.trt;
+    sys.mode = TRIGGER_MODE_STANDBY;
+    sys.selected_to_change = VARIABLE_CHANGE_TRT;
+    sys.var_to_change = &shutter_trigger.trt;
     encoder_vars.bt_press = 0;
 
     // Setup GPIO
@@ -118,8 +146,8 @@ int main(void){
     oled_send_text("T- Trigger:", 2);
     oled_send_text("Timelapse:", 4);
 
-    oled_send_chars("# Pics:", 5, 0, 0);
-    oled_send_chars("Interv:", 5, 64, 0);
+    oled_send_text_offset("# Pics:", 5, 0);
+    oled_send_text_offset("Interv:", 5, 64);
 
     
     // Enable interrupts
@@ -127,22 +155,25 @@ int main(void){
     
     while(1){
         _delay_ms(10);
-        if(shutter_trigger.mode == TRIGGER_MODE_STANDBY){
+        if(sys.mode == TRIGGER_MODE_STANDBY){
             // if we turn the rotary encoder
             if(encoder_vars.dir != ROTARY_ENCODER_ROT_NOTHING){
+                change_by = tens_radix[sys.selected_digit];
                 if(encoder_vars.dir == ROTARY_ENCODER_ROT_CW){
                     TURN_ON_RED_LED;
                     TURN_OFF_GREEN_LED;
-                    (*shutter_trigger.var_to_change)++;
+                    *sys.var_to_change += change_by;
                 }
                 else if(encoder_vars.dir ==ROTARY_ENCODER_ROT_CCW){
                     TURN_ON_GREEN_LED;
                     TURN_OFF_RED_LED;
-                    if(shutter_trigger.selected_to_change == 1){
-                        if(*shutter_trigger.var_to_change > 1){(*shutter_trigger.var_to_change)--;}
-                    } else {
-                        if(*shutter_trigger.var_to_change > 0){(*shutter_trigger.var_to_change)--;}
-                    }
+                    *sys.var_to_change -= change_by;
+                    // special case for trt were we are capping it at 1
+                    if(shutter_trigger.trt < 1)
+                        shutter_trigger.trt = 1;
+                    // cap any values at 0
+                    if(*sys.var_to_change < 0)
+                        *sys.var_to_change = 0;
                 }
                 update_sutter_trigger_time();
                 // Clear this variable after we are done with it
@@ -150,32 +181,22 @@ int main(void){
             }
             // if we press the trigger button, change MODE and start the arming
             if(READ_TRIGGER_BUTTON == 0){
-                shutter_trigger.old_trt = shutter_trigger.trt;
-                shutter_trigger.old_tt = shutter_trigger.tt;
-                blinking_led_var = 0;
-                timer_counter = 0;
-                RESET_TIMER;
-                TURN_OFF_ALL_LED;
-                if(shutter_trigger.tt == 0){
-                    TRIGGER_ON;
-                    shutter_trigger.mode = TRIGGER_MODE_TRIGGERED;
-                } else {
-                    shutter_trigger.mode = TRIGGER_MODE_ARM;
-                }
+                start_arming();
             }
             // if we press the mode button, switch modes
-            if(READ_MODE_BUTTON == 0){
+            if(READ_MODE_BUTTON == 0 && mode_bt_press == 0){
+                mode_bt_press = 1;
+                increment_change_var();
+            }
+            else if(READ_MODE_BUTTON == 1 && mode_bt_press){
+                mode_bt_press = 0;
             }
             // if we press the rotary encoder button, switch what value we are changing
             if(READ_ROTARY_ENCODER_BUTTON == 1 && encoder_vars.bt_press == 0){
                 encoder_vars.bt_press = 1;
-                if(shutter_trigger.selected_to_change == 1){
-                    shutter_trigger.selected_to_change = 2;
-                    shutter_trigger.var_to_change = &shutter_trigger.tt;
-                }
-                else{
-                    shutter_trigger.selected_to_change = 1;
-                    shutter_trigger.var_to_change = &shutter_trigger.trt;
+                sys.selected_digit += 1;
+                if(sys.selected_digit >= N_DIGITS){
+                    sys.selected_digit = 0;
                 }
                 update_sutter_trigger_time();
             }
@@ -187,21 +208,86 @@ int main(void){
     }
 }
 
+void start_arming(void){
+    // check that interval time, if npic != 0, is greater than trt
+    if(shutter_trigger.n_pic != 0){
+        if(shutter_trigger.tmlps_interv < (shutter_trigger.trt+shutter_trigger.tt)){
+            return;
+        }
+    }
+
+    memcpy(&old_shutter_trigger, &shutter_trigger, sizeof(shutter_trigger));
+    blinking_led_var = 0;
+    timer_counter = 0;
+    RESET_TIMER;
+    TURN_OFF_ALL_LED;
+    if(shutter_trigger.tt == 0){
+        TRIGGER_ON;
+        sys.mode = TRIGGER_MODE_TRIGGERED;
+    } else {
+        sys.mode = TRIGGER_MODE_ARM;
+    }
+}
+
+/**
+ * Gets called when we want to increment what variable we are changing
+ */
+void increment_change_var(void){
+    switch (sys.selected_to_change){
+    case VARIABLE_CHANGE_TRT:
+        sys.selected_to_change = VARIABLE_CHANGE_TT;
+        sys.var_to_change = &shutter_trigger.tt;
+        break;
+    case VARIABLE_CHANGE_TT:
+        sys.selected_to_change = VARIABLE_CHANGE_NPIC;
+        sys.var_to_change = &shutter_trigger.n_pic;
+        break;
+    case VARIABLE_CHANGE_NPIC:
+        sys.selected_to_change = VARIABLE_CHANGE_INVERV;
+        sys.var_to_change = &shutter_trigger.tmlps_interv;
+        break;
+    case VARIABLE_CHANGE_INVERV:
+        sys.selected_to_change = VARIABLE_CHANGE_TRT;
+        sys.var_to_change = &shutter_trigger.trt;
+        break;
+    }
+    update_sutter_trigger_time();
+}
+
 /**
  * Updates the display with the current trigger times
  */
 void update_sutter_trigger_time(void){
     char text[7];
+    int8_t underscore_digit;
+
+    underscore_digit = 0xFF;
     text_to_ascii(shutter_trigger.trt, text);
-    if(shutter_trigger.selected_to_change == 1){
-        text[0] = '>';
-    } else {text[0] = '-';}
-    oled_send_text(text, 1);
+    if(sys.selected_to_change == VARIABLE_CHANGE_TRT){
+        underscore_digit = N_DIGITS-sys.selected_digit-1;
+    }
+    oled_send_text_underscore(text, 1, underscore_digit);
+
+    underscore_digit = 0xFF;
     text_to_ascii(shutter_trigger.tt, text);
-    if(shutter_trigger.selected_to_change == 2){
-        text[0] = '>';
-    } else {text[0] = '-';}
-    oled_send_text(text, 3);
+    if(sys.selected_to_change == VARIABLE_CHANGE_TT){
+        underscore_digit = N_DIGITS-sys.selected_digit-1;
+    }
+    oled_send_text_underscore(text, 3, underscore_digit);
+
+    underscore_digit = 0xFF;
+    text_to_ascii(shutter_trigger.n_pic, text);
+    if(sys.selected_to_change == VARIABLE_CHANGE_NPIC){
+        underscore_digit = N_DIGITS-sys.selected_digit-1;
+    }
+    oled_send_text_underscore(text, 6, underscore_digit);
+
+    underscore_digit = 0xFF;
+    text_to_ascii(shutter_trigger.tmlps_interv, text);
+    if(sys.selected_to_change == VARIABLE_CHANGE_INVERV){
+        underscore_digit = N_DIGITS-sys.selected_digit-1;
+    }
+    oled_send_chars(text, 6, 64, underscore_digit);
 }
 
 /**
@@ -211,11 +297,11 @@ void update_sutter_trigger_time(void){
  */
 int text_to_ascii(uint16_t n, char *text){
     for(int i=0;i<=6;i++){text[i] = 0;}
-    uint8_t text_len = 5;
+    uint8_t text_len = N_DIGITS-1;
     while(1){
-        text[text_len--] = (n % 10) + 0x30;
+        text[text_len] = (n % 10) + 0x30;
         n /= 10;
-        if(text_len == 0){
+        if(text_len-- == 0){
             break;
         }
     }
@@ -229,38 +315,58 @@ ISR(TIMER0_COMPA_vect){
     // Only actually do stuff here once the counter reaches one second
     if(++timer_counter != 125){return;}else{timer_counter = 0;}        
 
-    switch(shutter_trigger.mode){
+    switch(sys.mode){
         case TRIGGER_MODE_ARM:
             blinking_led_var = !blinking_led_var;
-            if(blinking_led_var){TURN_ON_BLUE_LED;}else{TURN_OFF_BLUE_LED;}
+            if(blinking_led_var){TURN_ON_CYAN;}else{TURN_OFF_ALL_LED;}
             if(shutter_trigger.tt != 0){shutter_trigger.tt--;}
             if(shutter_trigger.tt == 0){
                 // TRIGGERED
                 TRIGGER_ON;
-                shutter_trigger.mode = TRIGGER_MODE_TRIGGERED;
+                sys.mode = TRIGGER_MODE_TRIGGERED;
             }
-            update_sutter_trigger_time();
             break;
         case TRIGGER_MODE_TRIGGERED:
+            TURN_ON_BLUE_LED;
             shutter_trigger.trt--;
             if(shutter_trigger.trt == 0){
-                // Trigger has stopped
-                shutter_trigger.mode = TRIGGER_MODE_END;
+                if(shutter_trigger.n_pic != 0){
+                    sys.mode = TRIGGER_MODE_WAITING_FOR_NEXT_PIC;
+                    shutter_trigger.n_pic--;
+                } else {
+                    // Trigger has stopped
+                    sys.mode = TRIGGER_MODE_END;
+                }
+                
             }
-            TURN_ON_BLUE_LED;
-            update_sutter_trigger_time();
+            break;
+        case TRIGGER_MODE_WAITING_FOR_NEXT_PIC:
+            TRIGGER_OFF; TURN_OFF_ALL_LED;
+            if(shutter_trigger.tmlps_interv == 0){
+                shutter_trigger.trt = old_shutter_trigger.trt;
+                shutter_trigger.tt = old_shutter_trigger.tt;
+                if(shutter_trigger.tt == 0){
+                    TRIGGER_ON;
+                    sys.mode = TRIGGER_MODE_TRIGGERED;
+                } else {
+                    sys.mode = TRIGGER_MODE_ARM;
+                }
+            }
             break;
         case TRIGGER_MODE_END:
             TRIGGER_OFF;
             TURN_OFF_ALL_LED;
-            shutter_trigger.trt = shutter_trigger.old_trt;
-            shutter_trigger.tt = shutter_trigger.old_tt;
-            shutter_trigger.mode = TRIGGER_MODE_STANDBY;
-            update_sutter_trigger_time();
+            memcpy(&shutter_trigger, &old_shutter_trigger, sizeof(shutter_trigger));
+            sys.mode = TRIGGER_MODE_STANDBY;
             break;
         default:
-            break;
+            return; // intentional as we don't want to update the screen if not in picture taking mode
     }
+
+    if(shutter_trigger.tmlps_interv != 0){
+        shutter_trigger.tmlps_interv--;
+    }
+    update_sutter_trigger_time();
 }
 
 /**
@@ -268,7 +374,7 @@ ISR(TIMER0_COMPA_vect){
  */
 ISR(PCINT_vect){
     static uint8_t pvcv;       // Previous Value (XX) and Current Value (YY), 0bXXYY
-    static uint8_t last_val;   // the last rotary encoder pin values
+    // static uint8_t last_val;   // the last rotary encoder pin values
 
     uint8_t r = READ_ROTARY_ENCODER_BIT;
     // only update if the value of the rotary encoder has changed

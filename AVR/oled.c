@@ -1,7 +1,6 @@
 #include "oled.h"
 
 void send_i2c_command(uint8_t i2cdata);
-void _oled_send_text(char *text, uint8_t starting_line, uint8_t column_start, uint8_t underscore_char);
 
 void send_i2c_command(uint8_t i2cdata){
 uint8_t to_send[] = {OLED_SLAVE_ADDR<<1, 0x00, i2cdata};
@@ -38,7 +37,15 @@ void oled_clear_display(){
 }
 
 void oled_send_text(char *text, uint8_t starting_line){
-    _oled_send_text(text, starting_line, 0, 0);
+    oled_send_chars(text, starting_line, 0, 0xFF);
+}
+
+void oled_send_text_underscore(char *text, uint8_t starting_line, uint8_t underscore_char){
+    oled_send_chars(text, starting_line, 0, underscore_char);
+}
+
+void oled_send_text_offset(char *text, uint8_t starting_line, uint8_t offset){
+    oled_send_chars(text, starting_line, offset, 0);
 }
 
 void oled_send_chars(char *text, uint8_t starting_line, uint8_t column_start, uint8_t underscore_char){
@@ -66,16 +73,16 @@ void oled_send_chars(char *text, uint8_t starting_line, uint8_t column_start, ui
             continue;
         }
 
+        // todo: either verify below, or don't have it at all!
+        // if((++txt_per_line)*6 >= 125){
+        //     for(k=0;k<5;k++){i2c_buff[k+2] = pgm_read_byte_near(&font[k]);}
+        //     USI_TWI_Start_Transceiver_With_Data(i2c_buff, 8);
+        //     oled_set_text_position(column_start, ++current_line);
+        //     txt_per_line = 0;
+        // }
 
-        if((++txt_per_line)*6 >= 125){
-            for(k=0;k<5;k++){i2c_buff[k+2] = pgm_read_byte_near(&font[k]);}
-            USI_TWI_Start_Transceiver_With_Data(i2c_buff, 8);
-            oled_set_text_position(column_start, ++current_line);
-            txt_per_line = 0;
-        }
-
-        for(k=0;k<5;k++){i2c_buff[k+2] = pgm_read_byte_near(&font[(((text[j]-0x2D) * 5) + k)]);}
-        if(underscore_char != 0 && underscore_char == j){
+        for(k=0;k<5;k++){i2c_buff[k+2] = pgm_read_byte_near(&font[(((text[j]-0x20) * 5) + k)]);}
+        if(underscore_char == j){
             for(k=0;k<5;k++){i2c_buff[k+2] |= 1<<7;}
         }
         USI_TWI_Start_Transceiver_With_Data(i2c_buff, 8);
