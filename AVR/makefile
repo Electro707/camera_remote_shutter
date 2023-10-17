@@ -1,10 +1,12 @@
 PORT=/dev/ttyUSB0
-MCU=attiny261
+MCU=attiny861
 
 LDFLAGS=-Wall, -Wl,-gc-sections -Wl,-relax -Wl,-Map=$(TARGET).map,--cref
 #CFLAGS=-g -Wall -mcall-prologues -mmcu=$(MCU) -Os
 #CFLAGS=-g -Wall -mmcu=$(MCU) -Os
 CFLAGS=-Wall -mmcu=$(MCU) -Os
+# See https://github.com/Alex079/vscode-avr-helper/issues/41
+CFLAGS+=--param=min-pagesize=0
 
 BUILD_FOLDER=build/
 

@@ -25,3 +25,6 @@ make program
 The 3D models for some components in the directory `PCB/3d_model/` are not included due to licensing reasons. You can grab the step files yourself and put it in that directory from the manufacturer. The models are
 - 12CE3H26F12T24.stp
 - CUI_DEVICES_SJ-2509N.step
+
+# License
+This project is licensed under GPLv3. See [LICENSE.md](LICENSE.md) for details.
