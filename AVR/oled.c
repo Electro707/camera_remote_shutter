@@ -1,3 +1,12 @@
+/**
+ * Camera Shutter Control Project, oled module
+ * By Electro707, 2023
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ */
+
 #include "oled.h"
 
 void send_i2c_command(uint8_t i2cdata);
