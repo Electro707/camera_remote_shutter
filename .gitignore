@@ -17,3 +17,6 @@ PCB/3d_model
 *.nogit*
 # FeeeCAD and CAD stuff
 *.FCStd1
+*.stl
+# VSCode
+*/.vscode/
