@@ -15,6 +15,7 @@
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
+#include <stdlib.h>
 #include "USI_TWI_Master.h"
 #include "oled.h"
 
@@ -38,8 +39,8 @@
 #define READ_TRIGGER_BUTTON ((PINA >> 2) & 0b1)
 #define READ_MODE_BUTTON ((PINA >> 3) & 0b1)
 /* Trigger Related Macros */
-#define TRIGGER_ON PORTA |= (1 << 0)
-#define TRIGGER_OFF PORTA &= ~(1 << 0)
+#define TRIGGER_ON PORTA |= (1 << 1); PORTA |= (1 << 0)
+#define TRIGGER_OFF PORTA &= ~(1 << 1); PORTA &= ~(1 << 0)
 
 #define RESET_TIMER TCNT0H = 0; TCNT0L = 0
 
@@ -50,11 +51,11 @@ typedef enum{
 }RotaryEncoderRotation_e;
 
 typedef enum{
-    TRIGGER_MODE_STANDBY = 0,
-    TRIGGER_MODE_ARM,
-    TRIGGER_MODE_TRIGGERED,
-    TRIGGER_MODE_WAITING_FOR_NEXT_PIC,
-    TRIGGER_MODE_END,
+    TRIGGER_MODE_STANDBY = 0,               // standby, doing nothing
+    TRIGGER_MODE_ARM,                       // arming, i.e waiting for trigger
+    TRIGGER_MODE_TRIGGERED,                 // triggered the camera
+    TRIGGER_MODE_WAITING_FOR_NEXT_PIC,      // waiting for the next picture in a multi picture arm
+    TRIGGER_MODE_END,                       // end of trigger
 }TriggerMode_e;
 
 typedef enum{
@@ -94,6 +95,11 @@ const int16_t tens_radix[5] = {1, 10, 100, 1000, 10000};
 uint8_t blinking_led_var = 0;       // Variable used for blinking an LED during pre-trigger time
 uint8_t timer_counter = 0;          // Counter used to make TIMER0 count once a second
 
+int currBattBar = -1;
+uint8_t isCharging = false;
+
+uint8_t flagUpdateTrigTime = false;
+
 ShutterTriggerVars_s shutter_trigger = {0};
 ShutterTriggerVars_s old_shutter_trigger = {0};
 RotaryEncoderStruct_s encoder_vars;
@@ -103,6 +109,9 @@ int text_to_ascii(uint16_t n, char *text);
 void update_sutter_trigger_time(void);
 void increment_change_var(void);
 void start_arming(void);
+
+void updateBatteryLevel(void);
+void update_batt_indicator(void);
 
 int main(void){
     uint8_t mode_bt_press = 0;
@@ -119,7 +128,9 @@ int main(void){
     DDRA = 0b00100011;
     DDRB = 0b00101111;
 
-    // Setup Timer
+    PORTA |= (0b11 << 6);
+
+    // Setup Timer 0 as the main ticker counter
     // 8Mhz / 256 / 250 = 125 Hz
     OCR0A = 250;
     TCCR0A = 1;
@@ -136,6 +147,14 @@ int main(void){
 //     PCMSK0 |= (1 << PCINT2) | (1 << PCINT3) | (1 << PCINT6) | (1 << PCINT7);
 //     PCMSK1 |= (1 << PCINT12);
     PCMSK0 |= (1 << PCINT6) | (1 << PCINT7);
+
+    // enable the battery ADC input, ADC3
+    ADMUX = (1 << REFS1) | (0b00011);      // select 2.56v reference, set mux to single ended PA4
+    ADCSRB = (1 << REFS2);          // ref for 2.56v. free running mode
+    DIDR0 = (1 << ADC3D);                          // disable digital input (only used for analog)
+    ADCSRA = (0b111 << 5);       // enable adc and start conversion
+    //ADCSRA = (1 << 7);       // enable adc
+
     
     USI_TWI_Master_Initialise();
     oled_init();
@@ -148,13 +167,14 @@ int main(void){
 
     oled_send_text_offset("# Pics:", 5, 0);
     oled_send_text_offset("Interv:", 5, 64);
-
     
     // Enable interrupts
     sei();
     
     while(1){
         _delay_ms(10);
+        updateBatteryLevel();
+        // only update if we are in standby
         if(sys.mode == TRIGGER_MODE_STANDBY){
             // if we turn the rotary encoder
             if(encoder_vars.dir != ROTARY_ENCODER_ROT_NOTHING){
@@ -205,6 +225,10 @@ int main(void){
                 encoder_vars.bt_press = 0;
             }
         }
+        if(flagUpdateTrigTime){
+            flagUpdateTrigTime = false;
+            update_sutter_trigger_time();
+        }
     }
 }
 
@@ -221,12 +245,12 @@ void start_arming(void){
     timer_counter = 0;
     RESET_TIMER;
     TURN_OFF_ALL_LED;
-    if(shutter_trigger.tt == 0){
-        TRIGGER_ON;
-        sys.mode = TRIGGER_MODE_TRIGGERED;
-    } else {
+    // if(shutter_trigger.tt == 0){
+        // TRIGGER_ON;
+        // sys.mode = TRIGGER_MODE_TRIGGERED;
+    // } else {
         sys.mode = TRIGGER_MODE_ARM;
-    }
+    // }
 }
 
 /**
@@ -291,6 +315,33 @@ void update_sutter_trigger_time(void){
 }
 
 /**
+ * Updates the current battery indicator to what it is
+ */
+void update_batt_indicator(void){
+    uint8_t batt[12];       // the battery shall be 12 pixels long
+    uint8_t *battP = batt;
+
+    *battP++ = 0xFF;     // start of battery symbol
+    for(uint8_t c=0;c<8;c++){
+        if(isCharging){
+            *battP = 0xA5;
+        } else {
+            if(c < (currBattBar << 1)){
+                *battP = 0xFF;
+            } else {
+                *battP = 0x81;
+            }
+        }
+        battP++;
+    }
+    *battP++ = 0xFF;
+    *battP++ = 0x3C;
+    *battP++ = 0x18;
+
+    oled_send_buff(batt, 12, 0, 128-12);
+}
+
+/**
  * Converts a number to a string
  *
  * todo: rename function
@@ -308,6 +359,80 @@ int text_to_ascii(uint16_t n, char *text){
     return text_len;
 }
 
+void tmp(uint16_t r){
+    char text[20];
+    text_to_ascii(r, text);
+    oled_send_text(text, 2);
+}
+
+/**
+ * Updates the battery indicator from the VCC measured voltage
+ *
+ * the ADC units are
+ *      meas(V/unit) = ADC * 2.56 * 2 / 1024
+ *      meas(V/unit) = ADC * 0.005
+ * so each ADC count is equal to 5mV
+ *
+ * Then we covert it to an approximate battery bar level
+ *      >4.0v       (800)       -> 4 bar (full)
+ *      4.0v - 3.7v (800 740)  -> 3 bar
+ *      3.7v - 3.5v (740-700)  -> 2 bar
+ *      3.5v - 3.3v (700-660)  -> 1 bar
+ *      <3.3v (660)            -> 0 bar (empty)
+ *
+ * we add some hysterysis (20 counts?) so that the results don't jump back and forth
+ */
+void updateBatteryLevel(void){
+    static int lastStateADC = 0;
+    static int lastChargeState = false;
+    int newBatteryBar;
+    uint16_t res;
+
+    if((PINB & (1 << 6)) == 0){
+        lastChargeState = true;
+    } else{
+        lastChargeState = false;
+    }
+
+    if(isCharging != lastChargeState){
+        isCharging = lastChargeState;
+        update_batt_indicator();
+    }
+
+    if(isCharging){
+        return;
+    }
+
+    if((ADCSRA & (1 << ADIF)) == 0){
+        return;
+    }
+    res = ((uint16_t)ADCH << 8) | ADCL;           // get our results
+    ADCSRA |= (1 << ADIF);
+
+    if(res >= 800){
+        newBatteryBar = 4;
+    } else if(res < 800 && res >= 740){
+        newBatteryBar = 3;
+    } else if(res < 740 && res >= 700){
+        newBatteryBar = 2;
+    } else if(res < 700 && res >= 660){
+        newBatteryBar = 1;
+    } else if(res < 660){
+        newBatteryBar = 0;
+    }
+
+    // tmp(res);
+
+    if(newBatteryBar != currBattBar){
+        // only update if we moved over by more 30 ADC counts than the last change reading
+        if(abs(res - lastStateADC) > 30){
+            lastStateADC = res;
+            currBattBar = newBatteryBar;
+            update_batt_indicator();
+        }
+    }
+}
+
 /**
  * Interrupt for timer. This gets triggered once every 1/125 seconds
  */
@@ -320,6 +445,7 @@ ISR(TIMER0_COMPA_vect){
             blinking_led_var = !blinking_led_var;
             if(blinking_led_var){TURN_ON_CYAN;}else{TURN_OFF_ALL_LED;}
             if(shutter_trigger.tt != 0){shutter_trigger.tt--;}
+            if(shutter_trigger.tmlps_interv != 0){shutter_trigger.tmlps_interv--;}
             if(shutter_trigger.tt == 0){
                 // TRIGGERED
                 TRIGGER_ON;
@@ -329,6 +455,7 @@ ISR(TIMER0_COMPA_vect){
         case TRIGGER_MODE_TRIGGERED:
             TURN_ON_BLUE_LED;
             shutter_trigger.trt--;
+            if(shutter_trigger.tmlps_interv != 0){shutter_trigger.tmlps_interv--;}
             if(shutter_trigger.trt == 0){
                 if(shutter_trigger.n_pic != 0){
                     sys.mode = TRIGGER_MODE_WAITING_FOR_NEXT_PIC;
@@ -351,6 +478,8 @@ ISR(TIMER0_COMPA_vect){
                 } else {
                     sys.mode = TRIGGER_MODE_ARM;
                 }
+            } else {
+                shutter_trigger.tmlps_interv--;
             }
             break;
         case TRIGGER_MODE_END:
@@ -363,10 +492,7 @@ ISR(TIMER0_COMPA_vect){
             return; // intentional as we don't want to update the screen if not in picture taking mode
     }
 
-    if(shutter_trigger.tmlps_interv != 0){
-        shutter_trigger.tmlps_interv--;
-    }
-    update_sutter_trigger_time();
+    flagUpdateTrigTime = true;
 }
 
 /**
@@ -376,28 +502,39 @@ ISR(PCINT_vect){
     static uint8_t pvcv;       // Previous Value (XX) and Current Value (YY), 0bXXYY
     // static uint8_t last_val;   // the last rotary encoder pin values
 
+    if(encoder_vars.dir != ROTARY_ENCODER_ROT_NOTHING){
+        GIFR |= (1 << PCIF);
+        return;
+    }
+    // GIMSK &= ~(1 << PCIE1);
+    // _delay_loop_2(7500);
+    _delay_loop_2(150);
+
     uint8_t r = READ_ROTARY_ENCODER_BIT;
     // only update if the value of the rotary encoder has changed
     // todo: wouldn't this always be the case anyways due to the interrupt?? test without
     //if(r != encoder_vars.last_val){
     //    encoder_vars.last_val = r;
-        pvcv = ((pvcv << 2) | r) & 0x0F;
-            
-        switch(pvcv){
-            case 0b0001:
-            case 0b0111:
-            case 0b1000:
-            case 0b1110:
-                encoder_vars.dir = ROTARY_ENCODER_ROT_CW;
-                break;
-            case 0b0010:
-            case 0b0100:
-            case 0b1011:
-            case 0b1101:
-                encoder_vars.dir = ROTARY_ENCODER_ROT_CCW;
-                break;
-        }
+    pvcv = ((pvcv << 2) | r) & 0x0F;
+
+    switch(pvcv){
+        // case 0b0001:
+        case 0b1000:
+        case 0b0111:
+        // case 0b1110:
+            encoder_vars.dir = ROTARY_ENCODER_ROT_CW;
+            // switchDebounce = 10;
+            break;
+        // case 0b0010:
+        case 0b0100:
+        case 0b1011:
+        // case 0b1101:
+            encoder_vars.dir = ROTARY_ENCODER_ROT_CCW;
+            // switchDebounce = 10;
+            break;
+    }
     //}
     // clear the interrupt flag for PCIF
     GIFR |= (1 << PCIF);
+
 }

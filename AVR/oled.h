@@ -28,6 +28,8 @@ void oled_set_text_position(uint8_t col, uint8_t line);
 void oled_send_text_underscore(char *text, uint8_t starting_line, uint8_t underscore_char);
 void oled_send_text_offset(char *text, uint8_t starting_line, uint8_t offset);
 
+void oled_send_buff(uint8_t *buff, uint8_t len, uint8_t starting_line, uint8_t column_start);
+
 void oled_send_chars(char *text, uint8_t starting_line, uint8_t column_start, uint8_t underscore_char);
 
 #endif

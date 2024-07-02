@@ -8,6 +8,9 @@ CFLAGS=-Wall -mmcu=$(MCU) -Os
 # See https://github.com/Alex079/vscode-avr-helper/issues/41
 CFLAGS+=--param=min-pagesize=0
 
+#PROGRAMMER=avrisp -b 19200 -P $(PORT)
+PROGRAMMER=usbasp -P usb -B 125kHz
+
 BUILD_FOLDER=build/
 
 default: compile size
@@ -26,7 +29,7 @@ size:
 	avr-size -C --mcu=$(MCU) $(BUILD_FOLDER)out.elf
 
 program: compile
-	avrdude -v -P $(PORT) -p $(MCU) -cavrisp -b 19200 -U flash:w:$(BUILD_FOLDER)out.hex -U efuse:w:0xff:m  -U hfuse:w:0xdf:m  -U lfuse:w:0xE2:m
+	avrdude -v -p $(MCU) -c$(PROGRAMMER) -U flash:w:$(BUILD_FOLDER)out.hex -U efuse:w:0xff:m  -U hfuse:w:0xdf:m  -U lfuse:w:0xE2:m
 
 clean:
 	rm -rf build

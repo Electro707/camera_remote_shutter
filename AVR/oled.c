@@ -2,6 +2,8 @@
  * Camera Shutter Control Project, oled module
  * By Electro707, 2023
  *
+ * This is for controlling the SSD1306 oled modules
+ *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
  * GNU General Public License as published by the Free Software Foundation, either version 3 of the
  * License, or (at your option) any later version.
@@ -12,8 +14,8 @@
 void send_i2c_command(uint8_t i2cdata);
 
 void send_i2c_command(uint8_t i2cdata){
-uint8_t to_send[] = {OLED_SLAVE_ADDR<<1, 0x00, i2cdata};
-USI_TWI_Start_Transceiver_With_Data(to_send, 3);
+    uint8_t to_send[] = {OLED_SLAVE_ADDR<<1, 0x00, i2cdata};
+    USI_TWI_Start_Transceiver_With_Data(to_send, 3);
 }
 
 
@@ -58,7 +60,7 @@ void oled_send_text_offset(char *text, uint8_t starting_line, uint8_t offset){
 }
 
 void oled_send_chars(char *text, uint8_t starting_line, uint8_t column_start, uint8_t underscore_char){
-    uint8_t i2c_buff[10];
+    uint8_t i2c_buff[8];
     uint8_t k = 0;
     uint8_t txt_per_line = 0;
     uint8_t current_line = starting_line;
@@ -97,6 +99,25 @@ void oled_send_chars(char *text, uint8_t starting_line, uint8_t column_start, ui
         USI_TWI_Start_Transceiver_With_Data(i2c_buff, 8);
 
     }
+}
+
+// len must be <32
+void oled_send_buff(uint8_t *buff, uint8_t len, uint8_t starting_line, uint8_t column_start){
+    // todo: this can be optmized with i2c_buff not existing, look into I2C functions
+    uint8_t i2c_buff[32];
+    uint8_t *i2c_buff_p = i2c_buff;
+    uint8_t Blen = len;
+
+    oled_set_text_position(column_start, starting_line);
+
+    *i2c_buff_p++ = OLED_SLAVE_ADDR<<1;
+    *i2c_buff_p++ = 0x40;
+
+    while(Blen--){
+        *i2c_buff_p++ = *buff++;
+    }
+
+    USI_TWI_Start_Transceiver_With_Data(i2c_buff, len+2);
 }
 
 void oled_init(){
